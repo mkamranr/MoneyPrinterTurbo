@@ -399,6 +399,31 @@ def _sync_chatterbox_config_from_session_state():
     )
 
 
+def _get_cached_local_tts_voices(base_url):
+    """按服务地址读取当前会话中的本机 TTS 音色查询结果。"""
+    cache = st.session_state.get("local_tts_voice_catalog_cache", {})
+    cached_voices = cache.get(str(base_url or "").strip(), [])
+    return cached_voices if isinstance(cached_voices, list) else []
+
+
+def _cache_local_tts_voices(base_url, voices):
+    """缓存主动查询到的音色，避免普通控件 rerun 后重复请求本机服务。"""
+    cache = st.session_state.setdefault("local_tts_voice_catalog_cache", {})
+    cache[str(base_url or "").strip()] = voices
+
+
+def _local_tts_voices_widget_key():
+    """
+    音色输入框的 key 带 nonce。
+
+    Streamlit 不允许在控件实例化后修改同名 session_state，而“从服务读取音色”
+    按钮渲染在输入框之后。递增 nonce 可以让下一次 rerun 创建新控件并显示刚刚
+    查询到的音色，而不需要绕过 Streamlit 的状态规则。
+    """
+    nonce = st.session_state.get("local_tts_voices_nonce", 0)
+    return f"local_tts_voices_input_{nonce}"
+
+
 def _sync_local_tts_config_from_session_state():
     # 与 Chatterbox 同理：本机 TTS 的配置输入框排在试听按钮之后，按钮触发的
     # rerun 必须先把 session_state 中的最新值同步进配置，否则试听仍会使用上一次
@@ -430,7 +455,7 @@ def _sync_local_tts_config_from_session_state():
         "voices",
         _parse_tts_voice_list(
             st.session_state.get(
-                "local_tts_voices_input",
+                _local_tts_voices_widget_key(),
                 config.local_tts.get("voices") or voice.DEFAULT_LOCAL_TTS_VOICES,
             )
         ),
@@ -5391,7 +5416,7 @@ def _render_audio_settings(panel, params):
                 local_tts_voices = st.text_input(
                     tr("Local TTS Voices"),
                     value=str(_saved_local_tts_voices or ""),
-                    key="local_tts_voices_input",
+                    key=_local_tts_voices_widget_key(),
                     placeholder=tr("Local TTS Voices Placeholder"),
                 )
                 _set_runtime_config(
@@ -5399,6 +5424,44 @@ def _render_audio_settings(panel, params):
                     "voices",
                     _parse_tts_voice_list(local_tts_voices),
                 )
+
+                # OpenAI 的语音接口没有音色发现端点，但多数自托管服务都额外
+                # 提供音色列表。主动查询比让用户手抄 ID 更可靠：未知音色在部分
+                # 服务上会被静默回退到默认音色，手写错误不会报错。
+                if st.button(
+                    tr("Load Local TTS Voices"),
+                    key="load_local_tts_voices_button",
+                    icon=":material/refresh:",
+                    use_container_width=True,
+                ):
+                    try:
+                        available_voices = voice.get_local_tts_voice_catalog(
+                            (local_tts_base_url or "").strip()
+                        )
+                    except Exception as exc:
+                        logger.warning(f"load local TTS voices failed: {exc}")
+                        st.error(
+                            tr("Local TTS Voices Load Failed").format(error=str(exc))
+                        )
+                    else:
+                        _cache_local_tts_voices(local_tts_base_url, available_voices)
+                        _set_runtime_config("local_tts", "voices", available_voices)
+                        st.session_state["local_tts_voices_nonce"] = (
+                            st.session_state.get("local_tts_voices_nonce", 0) + 1
+                        )
+                        st.session_state["local_tts_voices_loaded_count"] = len(
+                            available_voices
+                        )
+                        _save_runtime_config()
+                        st.rerun(scope="app")
+
+                loaded_count = st.session_state.pop(
+                    "local_tts_voices_loaded_count", None
+                )
+                if loaded_count:
+                    st.success(
+                        tr("Local TTS Voices Loaded").format(count=loaded_count)
+                    )
 
             # 三种模式只渲染当前任务真正需要的控件。自动配音可调音量和语速；
             # 上传音频只需要文件和音量；无配音不再展示无效设置。

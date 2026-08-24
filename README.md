@@ -414,9 +414,16 @@ In the audio panel set **Voiceover Service** to **Local TTS (OpenAI-compatible)*
 
 - **Local TTS Base URL** — must end in `/v1`, for example `http://localhost:8000/v1`.
 - **Local TTS Model** — the model id your server expects, for example `tts-1`.
-- **Local TTS Voices** — a comma-separated list of the voices your server accepts. The OpenAI
-  speech contract has no voice-discovery endpoint, so this list is what fills the dropdown. A
+- **Local TTS Voices** — the voice ids your server accepts, comma-separated. The OpenAI speech
+  contract has no voice-discovery endpoint, so this list is what fills the dropdown. A
   `-Female` or `-Male` suffix is display-only and is stripped before the request is sent.
+- **Load voices from server** — fetches the ids for you. It tries `/v1/audio/voices` first, then
+  `/voices` at the server root, and fills the field with whatever it finds.
+
+> [!IMPORTANT]
+> Prefer the button over typing ids. Some servers silently substitute their own default voice
+> for an unrecognised id and still return `200`, so a typo produces narration in the wrong
+> voice with no error anywhere.
 
 No API key is sent to this provider. If your server requires a bearer token, use
 **Chatterbox TTS** instead — it is the same OpenAI-speech client with an optional key.
@@ -429,11 +436,36 @@ The equivalent `config.toml` entries:
 [local_tts]
 base_url = "http://localhost:8000/v1"
 model = "tts-1"
-voices = ["alloy", "echo", "nova"]
+voices = ["af_heart", "am_michael", "bf_emma"]
+# Read timeout for one synthesis request; 0 disables it.
+timeout = 600
 ```
 
-> Both vLLM and most local speech servers default to port `8000`. If you run them on the same
-> machine, start one of them on a different port and update its Base URL to match.
+#### Worked example: Kokoro
+
+[Kokoro](https://github.com/hexgrad/kokoro) servers expose the endpoint directly. Point the
+provider at it and load the voices:
+
+- **Base URL** `http://localhost:8080/v1` — match your server's port.
+- **Model** anything; Kokoro accepts the field and ignores it.
+- **Load voices from server** returns ids like `af_heart`, `am_michael`, `bf_emma`.
+
+Two limits worth knowing:
+
+- Kokoro accepts **speed 0.5–2.0** and rejects anything outside it with HTTP 400. Every option
+  in the WebUI's **Voiceover Speed** control is inside that range, so this only affects `cli.py`
+  or API callers passing their own `voice_rate`.
+- On CPU it synthesises roughly **24 characters per second**, so about a minute of narration
+  takes ~40 seconds and a long script takes proportionally longer. That is what `timeout`
+  exists for; raise it if long scripts fail. The connect timeout stays at 10 seconds, so a
+  wrong host or port still fails in seconds rather than minutes.
+
+> Port `8080` is also this project's own API server default (`listen_port`). The WebUI on 8501
+> is unaffected, but you cannot run `uv run python main.py` while a server occupies 8080 —
+> change one of the two ports.
+
+> vLLM and many local speech servers both default to port `8000`. If you run both on one
+> machine, start one on a different port and update its Base URL to match.
 
 > Local TTS returns no word-level timestamps, so subtitles fall back to a single full-text
 > block. For a tighter subtitle timeline set `subtitle_provider = "whisper"` under `[app]` —

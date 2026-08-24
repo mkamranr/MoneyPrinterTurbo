@@ -79,6 +79,12 @@ LOCAL_TTS_VOICE_PREFIX = "local-tts:"
 DEFAULT_LOCAL_TTS_BASE_URL = "http://localhost:8000/v1"
 DEFAULT_LOCAL_TTS_MODEL = "tts-1"
 DEFAULT_LOCAL_TTS_VOICES = ["alloy"]
+# 连接超时与读取超时必须分开。地址或端口填错时要尽快失败（重试三次也只花
+# 几十秒），而本机 CPU 推理需要很长的读取时间：实测 Kokoro 在 CPU 上约每秒
+# 24 个字符，接近一分钟的旁白就要 40 秒，长脚本会更久。
+OPENAI_SPEECH_CONNECT_TIMEOUT_SECONDS = 10.0
+DEFAULT_CHATTERBOX_TIMEOUT_SECONDS = 120.0
+DEFAULT_LOCAL_TTS_TIMEOUT_SECONDS = 600.0
 NO_VOICE_NAME = "no-voice"
 # `none` 是 PR #981 里曾使用过的无配音标识。这里短期兼容这个值，避免
 # 已经手动调用过该分支的 API 用户升级后立即失效；WebUI 和新代码统一使用
@@ -226,6 +232,112 @@ def get_chatterbox_voices() -> list[str]:
         # keep the dropdown usable even before any voice is configured
         result = ["chatterbox:default-Female"]
     return result
+
+
+def get_local_tts_timeout_seconds() -> Union[float, None]:
+    """
+    获取本机 TTS 单次请求的读取超时时间。
+
+    本机推理速度取决于硬件：GPU 通常几秒完成，纯 CPU 明显更慢。默认 600 秒
+    足以覆盖长脚本，同时保留与 `edge_tts_timeout` 一致的语义——设置为 0 或
+    负数表示显式禁用超时。连接超时不受此项影响，始终保持较短。
+    """
+    raw_timeout = config.local_tts.get("timeout", DEFAULT_LOCAL_TTS_TIMEOUT_SECONDS)
+    try:
+        timeout_seconds = float(raw_timeout)
+    except (TypeError, ValueError):
+        logger.warning(
+            "invalid local_tts timeout: "
+            f"{raw_timeout}, fallback to {DEFAULT_LOCAL_TTS_TIMEOUT_SECONDS}s"
+        )
+        timeout_seconds = DEFAULT_LOCAL_TTS_TIMEOUT_SECONDS
+
+    if timeout_seconds <= 0:
+        return None
+
+    return timeout_seconds
+
+
+class LocalTtsVoiceCatalogError(RuntimeError):
+    """本机 TTS 音色列表查询失败。"""
+
+
+def _parse_local_tts_voice_catalog(payload) -> list[str]:
+    """
+    从音色列表响应中提取音色 ID。
+
+    OpenAI 的语音接口没有音色发现端点，各家自托管服务返回结构互不相同：
+    可能是 ``{"voices": [...]}``，也可能直接是数组；数组元素可能是字符串，
+    也可能是带 ``id`` 的对象。这里统一做宽松解析，保持顺序并去重。
+    """
+    if isinstance(payload, dict):
+        entries = payload.get("voices", payload.get("data", []))
+    else:
+        entries = payload
+    if not isinstance(entries, list):
+        return []
+
+    voices = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            voice_id = entry.get("id") or entry.get("voice_id") or entry.get("name")
+        else:
+            voice_id = entry
+        voice_id = str(voice_id or "").strip()
+        if voice_id and voice_id not in voices:
+            voices.append(voice_id)
+    return voices
+
+
+def get_local_tts_voice_catalog(base_url: str) -> list[str]:
+    """
+    查询本机 TTS 服务实际支持的音色列表。
+
+    ``/audio/speech`` 之外的路径没有统一标准，因此按顺序尝试两种常见位置：
+    ``{base_url}/audio/voices``（Kokoro-FastAPI 等）和去掉 ``/v1`` 后的
+    ``{root}/voices``（实测的 Kokoro TTS 服务）。第一个能解析出音色的响应
+    即为结果。
+
+    全部尝试失败时抛出异常而不是返回空列表：未知音色在部分服务上会被静默
+    回退到默认音色，静默失败会让用户误以为服务没有音色可用。
+    """
+    base_url = (base_url or "").strip().rstrip("/")
+    if not base_url:
+        raise LocalTtsVoiceCatalogError("local TTS base_url is not set")
+
+    candidates = [f"{base_url}/audio/voices"]
+    root_url = base_url[: -len("/v1")] if base_url.endswith("/v1") else base_url
+    root_candidate = f"{root_url}/voices"
+    if root_candidate not in candidates:
+        candidates.append(root_candidate)
+
+    errors = []
+    for url in candidates:
+        try:
+            response = requests.get(
+                url,
+                timeout=OPENAI_SPEECH_CONNECT_TIMEOUT_SECONDS,
+            )
+        except requests.RequestException as exc:
+            errors.append(f"{url}: {exc}")
+            continue
+
+        if response.status_code != 200:
+            errors.append(f"{url}: HTTP {response.status_code}")
+            continue
+
+        try:
+            voices = _parse_local_tts_voice_catalog(response.json())
+        except ValueError as exc:
+            errors.append(f"{url}: invalid JSON ({exc})")
+            continue
+
+        if voices:
+            logger.info(f"loaded {len(voices)} local TTS voices from {url}")
+            return voices
+        errors.append(f"{url}: no voices in response")
+
+    raise LocalTtsVoiceCatalogError("; ".join(errors))
 
 
 def get_local_tts_voices() -> list[str]:
@@ -1762,6 +1874,7 @@ def _openai_speech_tts(
     voice_rate: float = 1.0,
     provider_label: str = "openai speech",
     base_url_hint: str = "",
+    read_timeout: Union[float, None] = None,
 ) -> Union[SubMaker, None]:
     """Synthesize speech through an OpenAI-compatible ``/audio/speech`` endpoint.
 
@@ -1813,7 +1926,14 @@ def _openai_speech_tts(
             logger.info(f"start {provider_label} tts, voice: {voice}, try: {i + 1}")
             ensure_file_path_exists(voice_file)
 
-            response = requests.post(url, json=payload, headers=headers, timeout=120)
+            response = requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                # 连接和读取分别限时：地址填错时快速失败，慢速本机推理仍有
+                # 充足的读取预算。
+                timeout=(OPENAI_SPEECH_CONNECT_TIMEOUT_SECONDS, read_timeout),
+            )
             if response.status_code != 200:
                 logger.error(
                     f"{provider_label} tts failed with status "
@@ -1872,6 +1992,7 @@ def chatterbox_tts(
         voice_rate=voice_rate,
         provider_label="chatterbox",
         base_url_hint="please configure [chatterbox] base_url in config.toml",
+        read_timeout=DEFAULT_CHATTERBOX_TIMEOUT_SECONDS,
     )
 
 
@@ -1907,8 +2028,9 @@ def local_tts(
         ),
         api_key="",
         voice_rate=voice_rate,
-        provider_label="local tts",
+        provider_label="local",
         base_url_hint="please configure [local_tts] base_url in config.toml",
+        read_timeout=get_local_tts_timeout_seconds(),
     )
 
 

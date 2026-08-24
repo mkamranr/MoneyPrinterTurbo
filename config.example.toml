@@ -427,10 +427,21 @@ voices = ["default-Female"]
 base_url = "http://localhost:8000/v1"
 # The model id your server expects.
 model = "tts-1"
-# The OpenAI speech contract has no voice-discovery endpoint, so list the voice
-# names your server accepts. A "-Female" or "-Male" suffix is display-only and
-# is stripped before the request is sent.
-voices = ["alloy", "echo", "nova"]
+# The OpenAI speech contract has no voice-discovery endpoint, so these must be
+# voice ids your own server accepts. Prefer the "Load voices from server" button
+# in the WebUI over typing them: some servers silently substitute their default
+# voice for an unknown id, so a typo produces audio in the wrong voice with no
+# error. A "-Female" or "-Male" suffix is display-only and is stripped before
+# the request is sent.
+# Example ids below are from a Kokoro server; yours will differ.
+voices = ["af_heart", "am_michael", "bf_emma"]
+
+# Read timeout in seconds for one synthesis request. Local inference can be slow:
+# a Kokoro CPU server measures around 24 characters per second, so roughly a
+# minute of narration takes about 40 seconds and long scripts take proportionally
+# longer. Raise this if long scripts time out; 0 disables the limit. The connect
+# timeout is fixed at 10 seconds so a wrong host or port still fails quickly.
+timeout = 600
 
 [fish_audio]
 # Fish Audio TTS service: https://fish.audio

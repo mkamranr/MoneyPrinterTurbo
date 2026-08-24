@@ -922,6 +922,154 @@ class TestVoiceService(unittest.TestCase):
         self.assertIsNotNone(sub_maker)
         self.assertTrue(getattr(sub_maker, "subs", []))
 
+    def test_local_tts_timeout_is_configurable(self):
+        """Local CPU inference is slow, so the read budget must be tunable."""
+        with patch.object(vs.config, "local_tts", {}):
+            self.assertEqual(
+                vs.get_local_tts_timeout_seconds(),
+                vs.DEFAULT_LOCAL_TTS_TIMEOUT_SECONDS,
+            )
+
+        with patch.object(vs.config, "local_tts", {"timeout": 90}):
+            self.assertEqual(vs.get_local_tts_timeout_seconds(), 90.0)
+
+        # 0 or negative explicitly disables the limit, matching edge_tts_timeout.
+        for disabled in (0, -1):
+            with patch.object(vs.config, "local_tts", {"timeout": disabled}):
+                self.assertIsNone(vs.get_local_tts_timeout_seconds())
+
+        # a corrupt value must not break synthesis
+        with patch.object(vs.config, "local_tts", {"timeout": "soon"}):
+            self.assertEqual(
+                vs.get_local_tts_timeout_seconds(),
+                vs.DEFAULT_LOCAL_TTS_TIMEOUT_SECONDS,
+            )
+
+    def test_openai_speech_uses_split_connect_and_read_timeouts(self):
+        """A wrong host must fail fast while slow synthesis keeps its full budget."""
+
+        class _FakeResponse:
+            status_code = 200
+            content = b"audio"
+            text = ""
+
+        class _FakeClip:
+            duration = 1.0
+
+            def close(self):
+                pass
+
+        for tts_call, config_section, config_value, expected in (
+            (vs.local_tts, "local_tts", {"base_url": "http://localhost:8080/v1"},
+             (vs.OPENAI_SPEECH_CONNECT_TIMEOUT_SECONDS,
+              vs.DEFAULT_LOCAL_TTS_TIMEOUT_SECONDS)),
+            (vs.chatterbox_tts, "chatterbox", {"base_url": "http://localhost:4123/v1"},
+             (vs.OPENAI_SPEECH_CONNECT_TIMEOUT_SECONDS,
+              vs.DEFAULT_CHATTERBOX_TIMEOUT_SECONDS)),
+        ):
+            captured = {}
+
+            def _fake_post(url, json=None, headers=None, timeout=None):
+                captured["timeout"] = timeout
+                return _FakeResponse()
+
+            with tempfile.TemporaryDirectory() as tmp_dir, patch.object(
+                vs.config, config_section, config_value
+            ), patch.object(
+                vs.requests, "post", side_effect=_fake_post
+            ), patch.object(vs, "AudioFileClip", return_value=_FakeClip()):
+                tts_call(
+                    text="hi",
+                    voice="af_heart",
+                    voice_file=str(Path(tmp_dir) / "out.mp3"),
+                )
+
+            self.assertEqual(captured["timeout"], expected)
+
+    def test_local_tts_voice_catalog_parses_the_common_response_shapes(self):
+        """There is no standard voice-list format, so accept the known variants."""
+        shapes = (
+            # this project's Kokoro server: objects under a "voices" key
+            ({"voices": [{"id": "af_heart", "name": "Heart"},
+                         {"id": "am_michael", "name": "Michael"}]},
+             ["af_heart", "am_michael"]),
+            # plain string entries under a "voices" key
+            ({"voices": ["af_heart", "bf_emma"]}, ["af_heart", "bf_emma"]),
+            # a bare list
+            (["alloy", "echo"], ["alloy", "echo"]),
+            # objects with no id fall back to name
+            ({"voices": [{"name": "Solo"}]}, ["Solo"]),
+            # duplicates collapse but order is preserved
+            ({"voices": ["b", "a", "b"]}, ["b", "a"]),
+        )
+
+        for payload, expected in shapes:
+            class _FakeResponse:
+                status_code = 200
+
+                def json(self):
+                    return payload
+
+            with patch.object(vs.requests, "get", return_value=_FakeResponse()):
+                self.assertEqual(
+                    vs.get_local_tts_voice_catalog("http://localhost:8080/v1"),
+                    expected,
+                )
+
+    def test_local_tts_voice_catalog_falls_back_to_the_root_voices_path(self):
+        """`/voices` lives at the server root, not under `/v1`."""
+        attempted = []
+
+        class _FakeResponse:
+            def __init__(self, status_code, payload=None):
+                self.status_code = status_code
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        def _fake_get(url, timeout=None):
+            attempted.append(url)
+            if url.endswith("/v1/audio/voices"):
+                return _FakeResponse(404)
+            return _FakeResponse(200, {"voices": ["af_heart"]})
+
+        with patch.object(vs.requests, "get", side_effect=_fake_get):
+            voices = vs.get_local_tts_voice_catalog("http://localhost:8080/v1/")
+
+        self.assertEqual(voices, ["af_heart"])
+        self.assertEqual(
+            attempted,
+            [
+                "http://localhost:8080/v1/audio/voices",
+                "http://localhost:8080/voices",
+            ],
+        )
+
+    def test_local_tts_voice_catalog_raises_when_no_endpoint_answers(self):
+        """A silent empty list would look like a server with no voices."""
+        class _FakeResponse:
+            status_code = 404
+
+            def json(self):
+                return {}
+
+        with patch.object(vs.requests, "get", return_value=_FakeResponse()):
+            with self.assertRaises(vs.LocalTtsVoiceCatalogError):
+                vs.get_local_tts_voice_catalog("http://localhost:8080/v1")
+
+        with patch.object(
+            vs.requests, "get", side_effect=vs.requests.RequestException("refused")
+        ):
+            with self.assertRaises(vs.LocalTtsVoiceCatalogError):
+                vs.get_local_tts_voice_catalog("http://localhost:8080/v1")
+
+    def test_local_tts_voice_catalog_requires_a_base_url(self):
+        with patch.object(vs.requests, "get") as get:
+            with self.assertRaises(vs.LocalTtsVoiceCatalogError):
+                vs.get_local_tts_voice_catalog("   ")
+        get.assert_not_called()
+
     def test_local_tts_voice_helpers(self):
         """is_local_tts_voice / get_local_tts_voices basics and normalisation."""
         self.assertTrue(vs.is_local_tts_voice("local-tts:alloy"))

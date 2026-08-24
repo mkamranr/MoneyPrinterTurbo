@@ -126,8 +126,12 @@ def test_local_tts_renders_server_settings_without_an_api_key_input():
         app.run()
 
         rendered_keys = {str(getattr(item, "key", "")) for item in app.text_input}
+        # 音色输入框的 key 带 nonce 后缀，用于在读取音色后重建控件。
         for widget_key in LOCAL_TTS_WIDGET_KEYS:
-            assert widget_key in rendered_keys, widget_key
+            assert any(
+                key == widget_key or key.startswith(f"{widget_key}_")
+                for key in rendered_keys
+            ), widget_key
 
         # no credential widget exists for this provider
         assert not any(
@@ -141,6 +145,66 @@ def test_local_tts_renders_server_settings_without_an_api_key_input():
         # the voice dropdown is populated from [local_tts] voices
         voice_select = _widget_by_key(app.selectbox, "speech_synthesis_select_local-tts")
         assert voice_select.options
+
+    assert [str(item.value) for item in app.exception] == []
+
+
+def test_local_tts_load_button_writes_server_voices_into_config():
+    """从服务读取音色应直接写入配置，用户不必手抄 ID。"""
+    test_ui = dict(config.ui, voice_mode="tts", tts_server="local-tts", voice_name="")
+    test_local_tts = {"base_url": "http://localhost:9999/v1", "model": "tts-1"}
+
+    with (
+        patch.object(config, "ui", test_ui),
+        patch.object(config, "local_tts", test_local_tts),
+        patch.object(config, "save_config"),
+        patch.object(voice, "get_all_azure_voices", return_value=[]),
+        patch.object(
+            voice,
+            "get_local_tts_voice_catalog",
+            return_value=["af_heart", "am_michael"],
+        ) as catalog,
+    ):
+        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
+        app.session_state["ui_language"] = "en"
+        app.run()
+
+        _widget_by_key(app.button, "load_local_tts_voices_button").click().run()
+
+        catalog.assert_called_with("http://localhost:9999/v1")
+        assert test_local_tts["voices"] == ["af_heart", "am_michael"]
+
+    assert [str(item.value) for item in app.exception] == []
+
+
+def test_local_tts_load_button_surfaces_failures():
+    """查询失败必须提示用户，且不能清空已配置的音色。"""
+    test_ui = dict(config.ui, voice_mode="tts", tts_server="local-tts", voice_name="")
+    test_local_tts = {
+        "base_url": "http://localhost:9999/v1",
+        "model": "tts-1",
+        "voices": ["af_heart"],
+    }
+
+    with (
+        patch.object(config, "ui", test_ui),
+        patch.object(config, "local_tts", test_local_tts),
+        patch.object(config, "save_config"),
+        patch.object(voice, "get_all_azure_voices", return_value=[]),
+        patch.object(
+            voice,
+            "get_local_tts_voice_catalog",
+            side_effect=voice.LocalTtsVoiceCatalogError("connection refused"),
+        ),
+    ):
+        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
+        app.session_state["ui_language"] = "en"
+        app.run()
+
+        app = _widget_by_key(app.button, "load_local_tts_voices_button").click().run()
+
+        assert any("connection refused" in str(item.value) for item in app.error)
+        assert test_local_tts["voices"] == ["af_heart"]
 
     assert [str(item.value) for item in app.exception] == []
 

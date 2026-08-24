@@ -62,6 +62,8 @@ class TestConfigPersistence:
         assert local_tts_config["model"]
         assert isinstance(local_tts_config["voices"], list)
         assert local_tts_config["voices"]
+        # 本机推理可能很慢，读取超时必须可配置且在示例中给出默认值。
+        assert local_tts_config["timeout"] > 0
         # 该 Provider 面向未鉴权的本机服务，示例配置不应引导用户填写凭证。
         assert not any("key" in key for key in local_tts_config)
 
