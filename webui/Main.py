@@ -89,6 +89,13 @@ config_file = os.path.join(root_dir, "webui", ".streamlit", "webui.toml")
 # 语言列表必须在会话状态初始化前可用，首次访问时才能把浏览器 locale 映射到
 # 项目真正支持的语言；自动识别结果只进入当前会话，不修改全局配置。
 locales = utils.load_locales(i18n_dir)
+# 本机推理服务的默认地址取决于是否运行在容器中，无法写成静态 Registry 值。
+# 集中登记解析函数后，新增本地 Provider 只需要在这里加一行，不必再复制一份
+# base_url 预填和 Docker 提示逻辑。
+LOCAL_LLM_DEFAULT_BASE_URL_RESOLVERS = {
+    "ollama": config.get_default_ollama_base_url,
+    "vllm": config.get_default_vllm_base_url,
+}
 DEFAULT_CHATTERBOX_BASE_URL = "http://127.0.0.1:4123/v1"
 DEFAULT_CHATTERBOX_MODEL = "chatterbox"
 DEFAULT_CHATTERBOX_VOICES = ["default-Female"]
@@ -140,6 +147,7 @@ _RUNTIME_CONFIG_SECTIONS = {
     "app": config.app,
     "azure": config.azure,
     "chatterbox": config.chatterbox,
+    "local_tts": config.local_tts,
     "elevenlabs": config.elevenlabs,
     "minimax_tts": config.minimax_tts,
     "siliconflow": config.siliconflow,
@@ -336,8 +344,8 @@ def _run_llm_read_operation(operation_name, operation):
     return operation(app_config_snapshot)
 
 
-def _parse_chatterbox_voices(voices):
-    # Chatterbox 是自托管服务，音色列表由用户在 WebUI 中手动输入。
+def _parse_tts_voice_list(voices):
+    # 自托管 TTS 服务没有音色目录，音色列表由用户在 WebUI 中手动输入。
     # 这里统一兼容 TOML 数组和输入框里的逗号分隔字符串，避免下拉框、
     # 试听按钮和后续生成流程使用不同格式导致状态不一致。
     if isinstance(voices, str):
@@ -382,10 +390,48 @@ def _sync_chatterbox_config_from_session_state():
     _set_runtime_config(
         "chatterbox",
         "voices",
-        _parse_chatterbox_voices(
+        _parse_tts_voice_list(
             st.session_state.get(
                 "chatterbox_voices_input",
                 config.chatterbox.get("voices") or DEFAULT_CHATTERBOX_VOICES,
+            )
+        ),
+    )
+
+
+def _sync_local_tts_config_from_session_state():
+    # 与 Chatterbox 同理：本机 TTS 的配置输入框排在试听按钮之后，按钮触发的
+    # rerun 必须先把 session_state 中的最新值同步进配置，否则试听仍会使用上一次
+    # 保存的地址和模型。默认值直接取自服务层，避免出现第二份真实来源。
+    _set_runtime_config(
+        "local_tts",
+        "base_url",
+        (
+            st.session_state.get(
+                "local_tts_base_url_input",
+                config.local_tts.get("base_url") or voice.DEFAULT_LOCAL_TTS_BASE_URL,
+            )
+            or ""
+        ).strip(),
+    )
+    _set_runtime_config(
+        "local_tts",
+        "model",
+        (
+            st.session_state.get(
+                "local_tts_model_input",
+                config.local_tts.get("model") or voice.DEFAULT_LOCAL_TTS_MODEL,
+            )
+            or voice.DEFAULT_LOCAL_TTS_MODEL
+        ).strip(),
+    )
+    _set_runtime_config(
+        "local_tts",
+        "voices",
+        _parse_tts_voice_list(
+            st.session_state.get(
+                "local_tts_voices_input",
+                config.local_tts.get("voices") or voice.DEFAULT_LOCAL_TTS_VOICES,
             )
         ),
     )
@@ -1225,6 +1271,8 @@ def _infer_tts_server_from_voice(voice_name):
         return "elevenlabs"
     if voice.is_chatterbox_voice(voice_name):
         return "chatterbox"
+    if voice.is_local_tts_voice(voice_name):
+        return "local-tts"
     if voice.is_fish_audio_voice(voice_name):
         return "fish_audio"
     if voice.is_azure_v2_voice(voice_name):
@@ -2809,14 +2857,17 @@ def _render_settings_dialog():
                     # 成自定义值。输入为空时配置不会持久化，下一次仍回到兼容默认。
                     llm_base_url = str(configured_llm_base_url or "").strip()
 
-            if llm_provider == "ollama":
-                llm_default_base_url = config.get_default_ollama_base_url()
+            local_base_url_resolver = LOCAL_LLM_DEFAULT_BASE_URL_RESOLVERS.get(
+                llm_provider
+            )
+            if local_base_url_resolver is not None:
+                llm_default_base_url = local_base_url_resolver()
                 if not llm_base_url:
                     llm_base_url = llm_default_base_url
                 docker_hint = ""
                 if config.is_running_in_container():
                     docker_hint = tr_optional(
-                        "llm_provider_tips.ollama.docker_hint",
+                        f"llm_provider_tips.{llm_provider}.docker_hint",
                         fallback_language="en",
                     )
                 provider_tip_context["docker_hint"] = docker_hint
@@ -4149,6 +4200,12 @@ def _get_voice_preview_provider_signature(tts_server: str) -> dict:
             "model_id": config.chatterbox.get("model_id", ""),
             "credential": _credential_signature(config.chatterbox.get("api_key", "")),
         }
+    if tts_server == "local-tts":
+        # 该 Provider 不发送凭证，指纹只需覆盖服务地址和模型。
+        return {
+            "base_url": config.local_tts.get("base_url", ""),
+            "model_id": config.local_tts.get("model", ""),
+        }
     return {}
 
 
@@ -4164,6 +4221,8 @@ def _synthesize_voice_preview(
     """生成一次试听并转为内存缓存，临时文件不会跨会话长期保留。"""
     if selected_tts_server == "chatterbox":
         _sync_chatterbox_config_from_session_state()
+    elif selected_tts_server == "local-tts":
+        _sync_local_tts_config_from_session_state()
 
     temp_dir = utils.storage_dir("temp", create=True)
     audio_file = os.path.join(temp_dir, f"tmp-voice-{str(uuid4())}.mp3")
@@ -4910,6 +4969,7 @@ def _render_audio_settings(panel, params):
                 ("elevenlabs", "ElevenLabs TTS"),
                 ("chatterbox", "Chatterbox TTS"),
                 ("fish_audio", "Fish Audio TTS"),
+                ("local-tts", "Local TTS (OpenAI-compatible)"),
             ]
 
             tts_server_values = [server_value for server_value, _ in tts_servers]
@@ -4981,6 +5041,10 @@ def _render_audio_settings(panel, params):
                 filtered_voices = voice.get_chatterbox_voices()
             elif selected_tts_server == "fish_audio":
                 filtered_voices = voice.get_fish_audio_voices()
+            elif selected_tts_server == "local-tts":
+                # 自托管服务没有音色目录，音色来自 [local_tts] voices 配置。
+                _sync_local_tts_config_from_session_state()
+                filtered_voices = voice.get_local_tts_voices()
             else:
                 # 获取Azure的声音列表
                 all_voices = voice.get_all_azure_voices(filter_locals=None)
@@ -5002,7 +5066,7 @@ def _render_audio_settings(panel, params):
                 if voice.is_elevenlabs_voice(v):
                     parts = v.split(":", 2)
                     return parts[2] if len(parts) >= 3 else v
-                if voice.is_chatterbox_voice(v):
+                if voice.is_chatterbox_voice(v) or voice.is_local_tts_voice(v):
                     name = v.split(":", 1)[1] if ":" in v else v
                     return name.replace("-Female", "").replace("-Male", "")
                 if voice.is_minimax_voice(v):
@@ -5271,7 +5335,7 @@ def _render_audio_settings(panel, params):
                 )
 
                 _saved_chatterbox_voices = (
-                    _parse_chatterbox_voices(config.chatterbox.get("voices"))
+                    _parse_tts_voice_list(config.chatterbox.get("voices"))
                     or DEFAULT_CHATTERBOX_VOICES
                 )
                 if isinstance(_saved_chatterbox_voices, list):
@@ -5285,7 +5349,55 @@ def _render_audio_settings(panel, params):
                 _set_runtime_config(
                     "chatterbox",
                     "voices",
-                    _parse_chatterbox_voices(chatterbox_voices),
+                    _parse_tts_voice_list(chatterbox_voices),
+                )
+
+            # 本机 OpenAI 兼容语音服务。该 Provider 专门面向未启用鉴权的本地
+            # 部署，因此刻意不提供 API Key 输入框；需要 Bearer Token 的服务
+            # 请改用上面的 Chatterbox TTS。
+            if tts_mode_enabled and (
+                selected_tts_server == "local-tts"
+                or (voice_name and voice.is_local_tts_voice(voice_name))
+            ):
+                local_tts_base_url = st.text_input(
+                    tr("Local TTS Base URL"),
+                    value=config.local_tts.get("base_url")
+                    or voice.DEFAULT_LOCAL_TTS_BASE_URL,
+                    key="local_tts_base_url_input",
+                    placeholder=tr("Local TTS Base URL Placeholder"),
+                )
+                _set_runtime_config(
+                    "local_tts", "base_url", (local_tts_base_url or "").strip()
+                )
+
+                local_tts_model = st.text_input(
+                    tr("Local TTS Model"),
+                    value=config.local_tts.get("model")
+                    or voice.DEFAULT_LOCAL_TTS_MODEL,
+                    key="local_tts_model_input",
+                )
+                _set_runtime_config(
+                    "local_tts",
+                    "model",
+                    (local_tts_model or voice.DEFAULT_LOCAL_TTS_MODEL).strip(),
+                )
+
+                _saved_local_tts_voices = (
+                    _parse_tts_voice_list(config.local_tts.get("voices"))
+                    or voice.DEFAULT_LOCAL_TTS_VOICES
+                )
+                if isinstance(_saved_local_tts_voices, list):
+                    _saved_local_tts_voices = ", ".join(_saved_local_tts_voices)
+                local_tts_voices = st.text_input(
+                    tr("Local TTS Voices"),
+                    value=str(_saved_local_tts_voices or ""),
+                    key="local_tts_voices_input",
+                    placeholder=tr("Local TTS Voices Placeholder"),
+                )
+                _set_runtime_config(
+                    "local_tts",
+                    "voices",
+                    _parse_tts_voice_list(local_tts_voices),
                 )
 
             # 三种模式只渲染当前任务真正需要的控件。自动配音可调音量和语速；

@@ -392,6 +392,35 @@ def get_container_default_gateway_ip(route_path: str = "/proc/net/route") -> str
     return ""
 
 
+def _default_local_service_base_url(port: int, service_name: str) -> str:
+    """
+    返回本机推理服务的默认 OpenAI-compatible base_url。
+
+    Ollama 和 vLLM 都运行在用户本机，面对同一个问题：容器内的 localhost 指向
+    容器自身而不是宿主机。把解析顺序和日志集中在这里，之后新增本地推理服务
+    只需要提供端口，不必再复制一份宿主机地址探测逻辑。
+    """
+    if not is_running_in_container():
+        return f"http://localhost:{port}/v1"
+
+    if _can_resolve_hostname(_DOCKER_HOST_GATEWAY_NAME):
+        return f"http://{_DOCKER_HOST_GATEWAY_NAME}:{port}/v1"
+
+    gateway_ip = get_container_default_gateway_ip()
+    if gateway_ip:
+        logger.info(
+            "host.docker.internal is not resolvable, fallback to container "
+            f"default gateway for {service_name}: {gateway_ip}"
+        )
+        return f"http://{gateway_ip}:{port}/v1"
+
+    logger.warning(
+        "failed to resolve host.docker.internal and container default gateway; "
+        f"fallback to host.docker.internal for {service_name}"
+    )
+    return f"http://{_DOCKER_HOST_GATEWAY_NAME}:{port}/v1"
+
+
 def get_default_ollama_base_url() -> str:
     """
     返回 Ollama 的默认 OpenAI-compatible base_url。
@@ -399,25 +428,17 @@ def get_default_ollama_base_url() -> str:
     用户显式配置 `ollama_base_url` 时不会走这里；这里只处理“未配置时的
     最佳默认值”。容器内默认指向宿主机，普通本机运行默认指向 localhost。
     """
-    if not is_running_in_container():
-        return "http://localhost:11434/v1"
+    return _default_local_service_base_url(11434, "Ollama")
 
-    if _can_resolve_hostname(_DOCKER_HOST_GATEWAY_NAME):
-        return f"http://{_DOCKER_HOST_GATEWAY_NAME}:11434/v1"
 
-    gateway_ip = get_container_default_gateway_ip()
-    if gateway_ip:
-        logger.info(
-            "host.docker.internal is not resolvable, fallback to container "
-            f"default gateway for Ollama: {gateway_ip}"
-        )
-        return f"http://{gateway_ip}:11434/v1"
+def get_default_vllm_base_url() -> str:
+    """
+    返回 vLLM 的默认 OpenAI-compatible base_url。
 
-    logger.warning(
-        "failed to resolve host.docker.internal and container default gateway; "
-        "fallback to host.docker.internal for Ollama"
-    )
-    return f"http://{_DOCKER_HOST_GATEWAY_NAME}:11434/v1"
+    `vllm serve` 默认监听 8000 端口并暴露 /v1 前缀。用户显式配置
+    `vllm_base_url` 时不会走这里，容器内与 Ollama 共用宿主机地址解析。
+    """
+    return _default_local_service_base_url(8000, "vLLM")
 
 
 def _load_toml_config(config_path: str):
@@ -553,6 +574,7 @@ siliconflow = _SynchronizedConfig(_cfg.get("siliconflow", {}))
 minimax_tts = _SynchronizedConfig(_cfg.get("minimax_tts", {}))
 elevenlabs = _SynchronizedConfig(_cfg.get("elevenlabs", {}))
 chatterbox = _SynchronizedConfig(_cfg.get("chatterbox", {}))
+local_tts = _SynchronizedConfig(_cfg.get("local_tts", {}))
 fish_audio = _SynchronizedConfig(_cfg.get("fish_audio", {}))
 ui = _SynchronizedConfig(
     _cfg.get(

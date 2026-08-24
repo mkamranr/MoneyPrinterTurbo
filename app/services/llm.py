@@ -175,12 +175,20 @@ def _generate_response(prompt: str, app_config=None) -> str:
         adapter = provider.adapter
         api_version = ""
 
-        # Ollama 的默认地址依赖当前是否运行在容器中，无法作为静态 Registry
-        # 值保存；Registry 仍负责模型和必填规则，运行环境差异在这里解析。
+        # 本机推理服务的默认地址依赖当前是否运行在容器中，无法作为静态
+        # Registry 值保存；Registry 仍负责模型和必填规则，运行环境差异在这里
+        # 解析。OpenAI SDK 会拒绝空 api_key，因此两者都需要占位凭证。
         if llm_provider == "ollama":
             api_key = "ollama"
             if not base_url:
                 base_url = config.get_default_ollama_base_url()
+        elif llm_provider == "vllm":
+            # 只在用户没有填写时使用占位符：`vllm serve --api-key` 部署必须
+            # 收到真实 Key，未启用鉴权的服务器会直接忽略 "EMPTY"（vLLM 官方
+            # 示例使用的同一个占位值）。
+            api_key = api_key or "EMPTY"
+            if not base_url:
+                base_url = config.get_default_vllm_base_url()
 
         if adapter == "azure":
             api_version = runtime_app_config.get(

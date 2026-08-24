@@ -53,6 +53,18 @@ class TestConfigPersistence:
         assert app_config["shengsuanyun_api_key"] == ""
         assert example_config["whisper"]["device"] == "cpu"
 
+    def test_local_tts_section_is_exposed_and_documented(self):
+        """本机 TTS 需要独立配置分区，示例文件也应给出可直接使用的默认值。"""
+        assert isinstance(config.local_tts, dict)
+
+        local_tts_config = self._load_example_config()["local_tts"]
+        assert local_tts_config["base_url"].endswith("/v1")
+        assert local_tts_config["model"]
+        assert isinstance(local_tts_config["voices"], list)
+        assert local_tts_config["voices"]
+        # 该 Provider 面向未鉴权的本机服务，示例配置不应引导用户填写凭证。
+        assert not any("key" in key for key in local_tts_config)
+
     def test_example_config_covers_llm_provider_registry(self):
         """Registry 中可配置的 Provider 字段必须能在示例文件中被发现。"""
         app_config = self._load_example_config()["app"]

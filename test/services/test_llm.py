@@ -332,6 +332,7 @@ class TestLiteLLMProvider(unittest.TestCase):
                 "aimlapi",
                 "evolink",
                 "ollama",
+                "vllm",
                 "oneapi",
                 "litellm",
                 "groq",
@@ -1371,6 +1372,118 @@ class TestLiteLLMProvider(unittest.TestCase):
 
         with patch.object(config, "is_running_in_container", return_value=True):
             self._assert_ollama_base_url("http://ollama:11434/v1")
+
+    def _use_vllm_provider(
+        self,
+        base_url="",
+        api_key="",
+        model_name="Qwen/Qwen2.5-7B-Instruct",
+    ):
+        config.app["llm_provider"] = "vllm"
+        config.app["vllm_api_key"] = api_key
+        config.app["vllm_base_url"] = base_url
+        config.app["vllm_model_name"] = model_name
+
+    def _assert_vllm_client(self, expected_api_key: str, expected_base_url: str):
+        class FakeCompletions:
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                message = types.SimpleNamespace(content="hello\nvllm")
+                choice = types.SimpleNamespace(message=message)
+                return types.SimpleNamespace(choices=[choice])
+
+        fake_completions = FakeCompletions()
+        fake_client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=fake_completions)
+        )
+
+        with (
+            patch.object(llm, "OpenAI", return_value=fake_client) as openai_client,
+            patch.object(llm, "ChatCompletion", types.SimpleNamespace),
+        ):
+            result = llm._generate_response("Say hello")
+
+        openai_client.assert_called_once_with(
+            api_key=expected_api_key,
+            base_url=expected_base_url,
+        )
+        self.assertEqual(
+            fake_completions.kwargs,
+            {
+                "model": "Qwen/Qwen2.5-7B-Instruct",
+                "messages": [{"role": "user", "content": "Say hello"}],
+            },
+        )
+        self.assertEqual(result, "hello\nvllm")
+
+    def test_vllm_default_base_url_uses_localhost_outside_container(self):
+        """
+        本机运行 vLLM 时默认访问 localhost:8000，与官方 serve 默认端口一致。
+        """
+        self._use_vllm_provider()
+
+        with patch.object(config, "is_running_in_container", return_value=False):
+            self._assert_vllm_client("EMPTY", "http://localhost:8000/v1")
+
+    def test_vllm_default_base_url_uses_host_gateway_inside_container(self):
+        """
+        容器内 localhost 指向容器自身，默认改为 host.docker.internal，与
+        Ollama 使用同一套宿主机地址解析逻辑。
+        """
+        self._use_vllm_provider()
+
+        with (
+            patch.object(config, "is_running_in_container", return_value=True),
+            patch.object(config, "_can_resolve_hostname", return_value=True),
+        ):
+            self._assert_vllm_client("EMPTY", "http://host.docker.internal:8000/v1")
+
+    def test_vllm_default_base_url_falls_back_to_container_gateway(self):
+        """
+        原生 Linux Docker 无法解析 host.docker.internal 时回退容器默认网关。
+        """
+        self._use_vllm_provider()
+
+        with (
+            patch.object(config, "is_running_in_container", return_value=True),
+            patch.object(config, "_can_resolve_hostname", return_value=False),
+            patch.object(
+                config, "get_container_default_gateway_ip", return_value="172.17.0.1"
+            ),
+        ):
+            self._assert_vllm_client("EMPTY", "http://172.17.0.1:8000/v1")
+
+    def test_vllm_explicit_base_url_takes_precedence(self):
+        """
+        用户显式配置的 vllm_base_url 优先级最高，不受容器检测影响。
+        """
+        self._use_vllm_provider(base_url="http://vllm:8000/v1")
+
+        with patch.object(config, "is_running_in_container", return_value=True):
+            self._assert_vllm_client("EMPTY", "http://vllm:8000/v1")
+
+    def test_vllm_configured_api_key_is_sent_unchanged(self):
+        """
+        `vllm serve --api-key` 部署必须收到用户真实 Key，不能被占位符覆盖。
+        """
+        self._use_vllm_provider(
+            base_url="http://localhost:8000/v1",
+            api_key="sk-local-vllm",
+        )
+
+        self._assert_vllm_client("sk-local-vllm", "http://localhost:8000/v1")
+
+    def test_vllm_requires_a_model_name(self):
+        """
+        vLLM 没有默认模型：serve 的模型名由部署决定，必须由用户显式填写。
+        """
+        self._use_vllm_provider(base_url="http://localhost:8000/v1", model_name="")
+
+        with patch.object(llm, "OpenAI") as openai_client:
+            result = llm._generate_response("test")
+
+        openai_client.assert_not_called()
+        self.assertIn("model_name is not set", result)
 
     def test_mimo_provider_uses_openai_compatible_client(self):
         """

@@ -373,6 +373,14 @@ LLM_PROVIDER_REGISTRY = (
         show_api_key=False,
     ),
     LLMProviderSpec(
+        "vllm",
+        "vLLM",
+        # 本机 vLLM 默认不鉴权，但 `vllm serve --api-key` 同样常见，因此保留
+        # 可选的 Key 输入框，而不是像 Ollama 一样完全隐藏。Base URL 与模型名
+        # 都由部署决定：地址在运行时按是否在容器中解析，模型名必须用户填写。
+        requires_api_key=False,
+    ),
+    LLMProviderSpec(
         "oneapi",
         "OneAPI",
         api_key_url="https://github.com/songquanpeng/one-api",

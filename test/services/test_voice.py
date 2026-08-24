@@ -922,6 +922,200 @@ class TestVoiceService(unittest.TestCase):
         self.assertIsNotNone(sub_maker)
         self.assertTrue(getattr(sub_maker, "subs", []))
 
+    def test_local_tts_voice_helpers(self):
+        """is_local_tts_voice / get_local_tts_voices basics and normalisation."""
+        self.assertTrue(vs.is_local_tts_voice("local-tts:alloy"))
+        self.assertFalse(vs.is_local_tts_voice("chatterbox:default-Female"))
+        self.assertFalse(vs.is_local_tts_voice(""))
+        self.assertFalse(vs.is_local_tts_voice(None))
+
+        # entries are normalised to the local-tts:<name> dispatcher format,
+        # accepting both a TOML array and a comma-separated string
+        with patch.object(
+            vs.config,
+            "local_tts",
+            {"voices": ["nova", "local-tts:echo"]},
+        ):
+            self.assertEqual(
+                vs.get_local_tts_voices(),
+                ["local-tts:nova", "local-tts:echo"],
+            )
+
+        with patch.object(vs.config, "local_tts", {"voices": "alloy, echo ,"}):
+            self.assertEqual(
+                vs.get_local_tts_voices(),
+                ["local-tts:alloy", "local-tts:echo"],
+            )
+
+        # the dropdown stays usable before any voice is configured
+        with patch.object(vs.config, "local_tts", {}):
+            self.assertEqual(vs.get_local_tts_voices(), ["local-tts:alloy"])
+
+    def test_local_tts_posts_to_openai_endpoint_without_credentials(self):
+        """The whole point of this provider: no Authorization header is ever sent."""
+
+        class _FakeResponse:
+            status_code = 200
+            content = b"RIFF-fake-wav"
+            text = ""
+
+        class _FakeClip:
+            duration = 2.5
+
+            def close(self):
+                pass
+
+        captured = {}
+
+        def _fake_post(url, json=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return _FakeResponse()
+
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.object(
+            vs.config,
+            "local_tts",
+            {
+                # a trailing slash must not produce a doubled separator
+                "base_url": "http://localhost:8000/v1/",
+                "model": "kokoro",
+            },
+        ), patch.object(
+            vs.requests, "post", side_effect=_fake_post
+        ) as post, patch.object(
+            vs, "AudioFileClip", return_value=_FakeClip()
+        ):
+            voice_file = str(Path(tmp_dir) / "local.mp3")
+            sub_maker = vs.local_tts(
+                text="Hello world.",
+                voice="nova",
+                voice_file=voice_file,
+                voice_rate=1.25,
+                voice_volume=1.0,
+            )
+            generated_audio = Path(voice_file).read_bytes()
+
+        post.assert_called_once()
+        self.assertEqual(captured["url"], "http://localhost:8000/v1/audio/speech")
+        self.assertEqual(captured["json"]["model"], "kokoro")
+        self.assertEqual(captured["json"]["voice"], "nova")
+        self.assertEqual(captured["json"]["input"], "Hello world.")
+        self.assertEqual(captured["json"]["response_format"], "mp3")
+        self.assertAlmostEqual(captured["json"]["speed"], 1.25)
+        # no credential is configurable for this provider, so none is sent
+        self.assertNotIn("Authorization", captured["headers"])
+        # volume is not part of the OpenAI speech contract
+        self.assertNotIn("volume", captured["json"])
+        self.assertEqual(generated_audio, b"RIFF-fake-wav")
+        self.assertIsNotNone(sub_maker)
+        self.assertTrue(getattr(sub_maker, "subs", []))
+
+    def test_local_tts_falls_back_to_default_base_url_and_model(self):
+        """An unconfigured section still targets the documented local default."""
+
+        class _FakeResponse:
+            status_code = 200
+            content = b"audio"
+            text = ""
+
+        class _FakeClip:
+            duration = 1.0
+
+            def close(self):
+                pass
+
+        captured = {}
+
+        def _fake_post(url, json=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["json"] = json
+            return _FakeResponse()
+
+        with tempfile.TemporaryDirectory() as tmp_dir, patch.object(
+            vs.config, "local_tts", {}
+        ), patch.object(vs.requests, "post", side_effect=_fake_post), patch.object(
+            vs, "AudioFileClip", return_value=_FakeClip()
+        ):
+            vs.local_tts(
+                text="hi",
+                voice="alloy",
+                voice_file=str(Path(tmp_dir) / "local.mp3"),
+            )
+
+        self.assertEqual(
+            captured["url"],
+            f"{vs.DEFAULT_LOCAL_TTS_BASE_URL}/audio/speech",
+        )
+        self.assertEqual(captured["json"]["model"], vs.DEFAULT_LOCAL_TTS_MODEL)
+
+    def test_local_tts_clamps_speed_to_the_openai_range(self):
+        """OpenAI /audio/speech only accepts 0.25-4.0; out-of-range rates clamp."""
+
+        class _FakeResponse:
+            status_code = 200
+            content = b"audio"
+            text = ""
+
+        class _FakeClip:
+            duration = 1.0
+
+            def close(self):
+                pass
+
+        for voice_rate, expected_speed in ((0.1, 0.25), (9.0, 4.0)):
+            captured = {}
+
+            def _fake_post(url, json=None, headers=None, timeout=None):
+                captured["json"] = json
+                return _FakeResponse()
+
+            with tempfile.TemporaryDirectory() as tmp_dir, patch.object(
+                vs.config,
+                "local_tts",
+                {"base_url": "http://localhost:8000/v1", "model": "tts-1"},
+            ), patch.object(
+                vs.requests, "post", side_effect=_fake_post
+            ), patch.object(vs, "AudioFileClip", return_value=_FakeClip()):
+                vs.local_tts(
+                    text="hi",
+                    voice="alloy",
+                    voice_file=str(Path(tmp_dir) / "local.mp3"),
+                    voice_rate=voice_rate,
+                )
+
+            self.assertAlmostEqual(captured["json"]["speed"], expected_speed)
+
+    def test_tts_dispatches_local_tts_voices_and_strips_display_suffix(self):
+        """The dispatcher must route local-tts: voices and drop the gender suffix."""
+        with patch.object(vs, "local_tts", return_value="sub-maker") as local_tts:
+            result = vs.tts(
+                text="hello",
+                voice_name="local-tts:alloy-Female",
+                voice_rate=1.1,
+                voice_file="out.mp3",
+                voice_volume=1.0,
+            )
+
+        self.assertEqual(result, "sub-maker")
+        local_tts.assert_called_once_with("hello", "alloy", "out.mp3", 1.1, 1.0)
+
+    def test_tts_rejects_a_local_tts_voice_without_a_name(self):
+        """A bare prefix is a configuration error, not a silent Azure fallback."""
+        with patch.object(vs, "local_tts") as local_tts, patch.object(
+            vs, "azure_tts_v1"
+        ) as azure:
+            result = vs.tts(
+                text="hello",
+                voice_name="local-tts:",
+                voice_rate=1.0,
+                voice_file="out.mp3",
+            )
+
+        self.assertIsNone(result)
+        local_tts.assert_not_called()
+        azure.assert_not_called()
+
     def test_chatterbox_tts_requires_base_url(self):
         """Missing base_url short-circuits without any network call."""
         with patch.object(

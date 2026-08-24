@@ -72,6 +72,13 @@ GEMINI_TTS_VOICES = (
     ("Sulafat", "Warm"),
 )
 _MINIMAX_TTS_MAX_AUDIO_HEX_CHARS = 100 * 1024 * 1024
+# 通用本机 TTS：任何暴露 OpenAI `/v1/audio/speech` 的服务都可以直接接入，
+# 因此默认值只描述最常见的本机部署，不绑定任何具体项目。默认端口与 vLLM
+# 一致，是因为多数 OpenAI 兼容语音服务同样默认监听 8000。
+LOCAL_TTS_VOICE_PREFIX = "local-tts:"
+DEFAULT_LOCAL_TTS_BASE_URL = "http://localhost:8000/v1"
+DEFAULT_LOCAL_TTS_MODEL = "tts-1"
+DEFAULT_LOCAL_TTS_VOICES = ["alloy"]
 NO_VOICE_NAME = "no-voice"
 # `none` 是 PR #981 里曾使用过的无配音标识。这里短期兼容这个值，避免
 # 已经手动调用过该分支的 API 用户升级后立即失效；WebUI 和新代码统一使用
@@ -221,6 +228,33 @@ def get_chatterbox_voices() -> list[str]:
     return result
 
 
+def get_local_tts_voices() -> list[str]:
+    """Return the configured local OpenAI-compatible TTS voices.
+
+    The OpenAI speech contract has no voice-discovery endpoint, so operators list
+    the voice names their server accepts via ``[local_tts] voices`` (a TOML array,
+    or a comma-separated string). Each entry is normalised to the
+    ``local-tts:<name>`` format used by the TTS dispatcher.
+    """
+    voices = config.local_tts.get("voices", []) or []
+    if isinstance(voices, str):
+        voices = [v.strip() for v in voices.split(",") if v.strip()]
+    result = []
+    for v in voices:
+        v = str(v).strip()
+        if not v:
+            continue
+        result.append(
+            v
+            if v.startswith(LOCAL_TTS_VOICE_PREFIX)
+            else f"{LOCAL_TTS_VOICE_PREFIX}{v}"
+        )
+    if not result:
+        # keep the dropdown usable before any voice is configured
+        result = [f"{LOCAL_TTS_VOICE_PREFIX}{DEFAULT_LOCAL_TTS_VOICES[0]}"]
+    return result
+
+
 def get_fish_audio_voices() -> list[str]:
     """Return configured Fish Audio voices.
 
@@ -343,6 +377,10 @@ def get_elevenlabs_api_key() -> str:
 
 def is_chatterbox_voice(voice_name: str) -> bool:
     return (voice_name or "").startswith("chatterbox:")
+
+
+def is_local_tts_voice(voice_name: str) -> bool:
+    return (voice_name or "").startswith(LOCAL_TTS_VOICE_PREFIX)
 
 
 def is_fish_audio_voice(voice_name: str) -> bool:
@@ -543,6 +581,17 @@ def tts(
             )
         else:
             logger.error(f"Invalid chatterbox voice name format: {voice_name}")
+            return None
+    elif is_local_tts_voice(voice_name):
+        # 格式: local-tts:<voice>，voice 可带显示用的 -Female/-Male 后缀
+        parts = voice_name.split(":", 1)
+        if len(parts) >= 2 and parts[1].strip():
+            local_voice = parts[1].strip()
+            if local_voice.endswith(("-Female", "-Male")):
+                local_voice = local_voice.rsplit("-", 1)[0]
+            return local_tts(text, local_voice, voice_file, voice_rate, voice_volume)
+        else:
+            logger.error(f"Invalid local TTS voice name format: {voice_name}")
             return None
     elif is_fish_audio_voice(voice_name):
         parts = voice_name.split(":")
@@ -1702,6 +1751,96 @@ def elevenlabs_tts(
     return None
 
 
+def _openai_speech_tts(
+    text: str,
+    voice: str,
+    voice_file: str,
+    *,
+    base_url: str,
+    model_id: str,
+    api_key: str = "",
+    voice_rate: float = 1.0,
+    provider_label: str = "openai speech",
+    base_url_hint: str = "",
+) -> Union[SubMaker, None]:
+    """Synthesize speech through an OpenAI-compatible ``/audio/speech`` endpoint.
+
+    Shared by every self-hosted speech provider — Chatterbox and the generic
+    local TTS option. The request shape, retry policy, and subtitle fallback are
+    identical across them; only the configuration source and the log label
+    differ, so keeping one implementation avoids two copies drifting apart.
+
+    ``api_key`` is optional: local servers usually run without authentication,
+    and an empty value means no ``Authorization`` header is sent at all.
+
+    The OpenAI speech contract returns no word-level timestamps, so this falls
+    back to a full-text SubMaker. For tighter subtitle sync set
+    ``subtitle_provider = "whisper"``.
+    """
+    text = (text or "").strip()
+    if not text:
+        logger.error(f"{provider_label} TTS text is empty")
+        return None
+
+    base_url = (base_url or "").strip().rstrip("/")
+    if not base_url:
+        logger.error(
+            f"{provider_label} base_url is not set"
+            + (f", {base_url_hint}" if base_url_hint else "")
+        )
+        return None
+
+    url = f"{base_url}/audio/speech"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    payload = {
+        "model": model_id,
+        "input": text,
+        "voice": voice,
+        "response_format": "mp3",
+        # OpenAI speech API accepts speed 0.25-4.0; MoneyPrinterTurbo's rate is a
+        # 1.0-centred multiplier, so it maps directly (clamped to the valid range).
+        "speed": max(0.25, min(4.0, float(voice_rate or 1.0))),
+    }
+    # voice_volume is accepted by the callers for parity with the other TTS
+    # providers but is intentionally not sent: the OpenAI /audio/speech contract
+    # has no volume field, so servers ignore it. Adjust loudness via voice_rate
+    # (speed) or in post-processing instead.
+
+    for i in range(3):
+        try:
+            logger.info(f"start {provider_label} tts, voice: {voice}, try: {i + 1}")
+            ensure_file_path_exists(voice_file)
+
+            response = requests.post(url, json=payload, headers=headers, timeout=120)
+            if response.status_code != 200:
+                logger.error(
+                    f"{provider_label} tts failed with status "
+                    f"{response.status_code}: {response.text[:200]}"
+                )
+                continue
+
+            with open(voice_file, "wb") as f:
+                f.write(response.content)
+
+            audio_clip = AudioFileClip(voice_file)
+            audio_duration = audio_clip.duration
+            audio_clip.close()
+
+            sub_maker = ensure_legacy_submaker_fields(SubMaker())
+            logger.success(f"{provider_label} tts succeeded: {voice_file}")
+            return populate_legacy_submaker_with_full_text(
+                sub_maker=sub_maker,
+                text=text,
+                audio_duration_seconds=audio_duration,
+            )
+        except Exception as e:
+            logger.error(f"{provider_label} tts failed: {str(e)}")
+
+    return None
+
+
 def chatterbox_tts(
     text: str,
     voice: str,
@@ -1718,75 +1857,59 @@ def chatterbox_tts(
     with the common community servers (e.g. devnen/Chatterbox-TTS-Server,
     travisvn/chatterbox-tts-api). Configure ``[chatterbox] base_url`` (and an
     optional ``api_key``).
-
-    Like ElevenLabs, Chatterbox does not return word-level timestamps, so the
-    subtitle path falls back to the full-text SubMaker. For tighter subtitle
-    sync set ``subtitle_provider = "whisper"``.
     """
-    text = (text or "").strip()
-    if not text:
-        logger.error("Chatterbox TTS text is empty")
-        return None
+    return _openai_speech_tts(
+        text,
+        voice,
+        voice_file,
+        base_url=config.chatterbox.get("base_url", "") or "",
+        model_id=(
+            model_id
+            or config.chatterbox.get("model_id", "chatterbox")
+            or "chatterbox"
+        ),
+        api_key=config.chatterbox.get("api_key", ""),
+        voice_rate=voice_rate,
+        provider_label="chatterbox",
+        base_url_hint="please configure [chatterbox] base_url in config.toml",
+    )
 
-    base_url = (config.chatterbox.get("base_url", "") or "").strip().rstrip("/")
-    if not base_url:
-        logger.error(
-            "Chatterbox base_url is not set, please configure [chatterbox] base_url in config.toml"
-        )
-        return None
 
-    api_key = config.chatterbox.get("api_key", "")
-    if not model_id:
-        model_id = config.chatterbox.get("model_id", "chatterbox") or "chatterbox"
+def local_tts(
+    text: str,
+    voice: str,
+    voice_file: str,
+    voice_rate: float = 1.0,
+    voice_volume: float = 1.0,
+    model_id: str = "",
+) -> Union[SubMaker, None]:
+    """Generate speech with any locally hosted OpenAI-compatible TTS server.
 
-    url = f"{base_url}/audio/speech"
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    payload = {
-        "model": model_id,
-        "input": text,
-        "voice": voice,
-        "response_format": "mp3",
-        # OpenAI speech API accepts speed 0.25-4.0; MoneyPrinterTurbo's rate is a
-        # 1.0-centred multiplier, so it maps directly (clamped to the valid range).
-        "speed": max(0.25, min(4.0, float(voice_rate or 1.0))),
-    }
-    # voice_volume is accepted for parity with the other TTS providers but is
-    # intentionally not sent: the OpenAI /audio/speech contract has no volume
-    # field, so Chatterbox servers ignore it. Adjust loudness via voice_rate
-    # (speed) or in post-processing instead.
+    Targets the plain ``/v1/audio/speech`` contract, so it works with whatever
+    the operator is running locally (openedai-speech, Kokoro-FastAPI, LM Studio,
+    a vLLM-hosted speech model, ...). Configure ``[local_tts] base_url``,
+    ``model``, and ``voices``.
 
-    for i in range(3):
-        try:
-            logger.info(f"start chatterbox tts, voice: {voice}, try: {i + 1}")
-            ensure_file_path_exists(voice_file)
-
-            response = requests.post(url, json=payload, headers=headers, timeout=120)
-            if response.status_code != 200:
-                logger.error(
-                    f"chatterbox tts failed with status {response.status_code}: {response.text[:200]}"
-                )
-                continue
-
-            with open(voice_file, "wb") as f:
-                f.write(response.content)
-
-            audio_clip = AudioFileClip(voice_file)
-            audio_duration = audio_clip.duration
-            audio_clip.close()
-
-            sub_maker = ensure_legacy_submaker_fields(SubMaker())
-            logger.success(f"chatterbox tts succeeded: {voice_file}")
-            return populate_legacy_submaker_with_full_text(
-                sub_maker=sub_maker,
-                text=text,
-                audio_duration_seconds=audio_duration,
-            )
-        except Exception as e:
-            logger.error(f"chatterbox tts failed: {str(e)}")
-
-    return None
+    No API key is sent: this provider exists for unauthenticated local servers.
+    Point Chatterbox TTS at the service instead when a bearer token is required.
+    """
+    return _openai_speech_tts(
+        text,
+        voice,
+        voice_file,
+        base_url=(
+            config.local_tts.get("base_url", "") or DEFAULT_LOCAL_TTS_BASE_URL
+        ),
+        model_id=(
+            model_id
+            or config.local_tts.get("model", DEFAULT_LOCAL_TTS_MODEL)
+            or DEFAULT_LOCAL_TTS_MODEL
+        ),
+        api_key="",
+        voice_rate=voice_rate,
+        provider_label="local tts",
+        base_url_hint="please configure [local_tts] base_url in config.toml",
+    )
 
 
 # Fish Audio supported models.

@@ -35,6 +35,13 @@ TTS_PROVIDER_WIDGETS = {
     "elevenlabs": ("elevenlabs_api_key_input", "ElevenLabs API Key"),
     "chatterbox": ("chatterbox_api_key_input", "Chatterbox API Key"),
 }
+# Local TTS targets unauthenticated servers, so it deliberately has no API key
+# widget and cannot appear in TTS_PROVIDER_WIDGETS above.
+LOCAL_TTS_WIDGET_KEYS = (
+    "local_tts_base_url_input",
+    "local_tts_model_input",
+    "local_tts_voices_input",
+)
 
 
 def _load_translation(locale: str) -> dict:
@@ -95,6 +102,45 @@ def test_tts_provider_inputs_render_the_standardized_labels():
             assert api_key_input.label == translations[label_key]
             assert api_key_input.proto.type == api_key_input.proto.PASSWORD
             assert not getattr(api_key_input.proto, "help", "")
+
+    assert [str(item.value) for item in app.exception] == []
+
+
+def test_local_tts_renders_server_settings_without_an_api_key_input():
+    """本机 TTS 面向未鉴权服务：必须提供地址/模型/音色，且不能出现 Key 输入框。"""
+    test_ui = dict(
+        config.ui,
+        voice_mode="tts",
+        tts_server="local-tts",
+        voice_name="local-tts:alloy",
+    )
+
+    with (
+        patch.object(config, "ui", test_ui),
+        patch.object(config, "local_tts", {}),
+        patch.object(config, "save_config"),
+        patch.object(voice, "get_all_azure_voices", return_value=[]),
+    ):
+        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
+        app.session_state["ui_language"] = "en"
+        app.run()
+
+        rendered_keys = {str(getattr(item, "key", "")) for item in app.text_input}
+        for widget_key in LOCAL_TTS_WIDGET_KEYS:
+            assert widget_key in rendered_keys, widget_key
+
+        # no credential widget exists for this provider
+        assert not any(
+            "local_tts" in key and "api_key" in key for key in rendered_keys
+        )
+
+        base_url_input = _widget_by_key(app.text_input, "local_tts_base_url_input")
+        assert base_url_input.value == voice.DEFAULT_LOCAL_TTS_BASE_URL
+        assert base_url_input.proto.type != base_url_input.proto.PASSWORD
+
+        # the voice dropdown is populated from [local_tts] voices
+        voice_select = _widget_by_key(app.selectbox, "speech_synthesis_select_local-tts")
+        assert voice_select.options
 
     assert [str(item.value) for item in app.exception] == []
 
