@@ -14,9 +14,18 @@
 <a href="https://trendshift.io/repositories/8731" target="_blank"><img src="https://trendshift.io/api/badge/repositories/8731" alt="harry0703%2FMoneyPrinterTurbo | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 <a href="https://www.star-history.com/harry0703/moneyprinterturbo"><img src="https://api.star-history.com/badge?repo=harry0703/MoneyPrinterTurbo" alt="Star History Rank" style="height: 55px;" height="55"/></a>
 
-日本語 | [English](README-en.md) | [简体中文](README.md) | [リリース](https://github.com/harry0703/MoneyPrinterTurbo/releases) | [Issues](https://github.com/harry0703/MoneyPrinterTurbo/issues)
+日本語 | [English](README.md) | [简体中文](README-zh.md) | [リリース](https://github.com/harry0703/MoneyPrinterTurbo/releases) | [Issues](https://github.com/harry0703/MoneyPrinterTurbo/issues)
 
 </div>
+
+> [!NOTE]
+> **このリポジトリは [harry0703/MoneyPrinterTurbo](https://github.com/harry0703/MoneyPrinterTurbo) の Fork です。**
+>
+> オリジナルプロジェクトの功績はすべて [harry0703](https://github.com/harry0703) と上流の
+> [コントリビューター](https://github.com/harry0703/MoneyPrinterTurbo/graphs/contributors) に帰属します。
+> この Fork は上流に追従しつつ、台本生成とナレーションをセルフホストのモデルで実行する機能を追加しています
+> （詳細は英語版の [Local Models](README.md#local-models-) を参照）。ライセンスはオリジナルと同じ
+> [MIT License](LICENSE) です。
 
 ## スクリーンショット 🖥️
 
@@ -126,11 +135,12 @@
 - [x] **動画の一括生成**に対応。一度に複数の動画を作成し、最も満足のいくものを選べます
 - [x] **動画クリップの長さ**の設定に対応。素材の切り替え頻度を調整しやすくなります
 - [x] **多言語の動画台本**生成に対応
-- [x] **Edge TTS**、**Azure Speech**、**SiliconFlow**、**Google Gemini**、**Xiaomi MiMo**、**ElevenLabs**、**Chatterbox**、**Fish Audio** による音声合成とリアルタイムプレビューに対応
+- [x] **Edge TTS**、**Azure Speech**、**SiliconFlow**、**Google Gemini**、**Xiaomi MiMo**、**ElevenLabs**、**Chatterbox**、**Fish Audio**、および**セルフホストの OpenAI 互換 TTS** サーバーによる音声合成とリアルタイムプレビューに対応
 - [x] **字幕生成**に対応。フォント、位置、色、サイズ、縁取り、背景スタイルを設定できます
 - [x] ランダムまたはカスタムの **BGM** に対応し、音量も調整できます
 - [x] 手持ちの**ローカル素材**に加え、**Pexels**、**Pixabay**、**Coverr** の無料で使える高画質素材に対応
-- [x] **Kimi / Moonshot AI**、**OpenAI**、**Google Gemini**、**DeepSeek**、**Alibaba Cloud Qwen**、**Microsoft Azure OpenAI**、**ByteDance VolcEngine Ark**、**xAI Grok**、**MiniMax**、**Xiaomi MiMo** といった主要なモデルプロバイダーに加え、**Cloudflare AI Gateway**、**Alibaba ModelScope**、**AIHubMix**、**AIML API**、**EvoLink**、**Ollama**、**OneAPI**、**LiteLLM**、**Groq**、**Pollinations AI** などの統合ゲートウェイ、アグリゲーター、ローカルランタイムに対応
+- [x] **Kimi / Moonshot AI**、**OpenAI**、**Google Gemini**、**DeepSeek**、**Alibaba Cloud Qwen**、**Microsoft Azure OpenAI**、**ByteDance VolcEngine Ark**、**xAI Grok**、**MiniMax**、**Xiaomi MiMo** といった主要なモデルプロバイダーに加え、**Cloudflare AI Gateway**、**Alibaba ModelScope**、**AIHubMix**、**AIML API**、**EvoLink**、**vLLM**、**Ollama**、**OneAPI**、**LiteLLM**、**Groq**、**Pollinations AI** などの統合ゲートウェイ、アグリゲーター、ローカルランタイムに対応
+- [x] ローカルモデルと組み合わせれば **完全にローカル環境で動作**します。台本は [vLLM](https://docs.vllm.ai) または Ollama、ナレーションはセルフホストの OpenAI 互換 TTS サーバー、素材は手持ちの動画を使うことで、クラウドの API キーは不要です
 - [x] 動画生成後、**TikTok**、**Instagram**、**YouTube Shorts** へワンクリックで**クロスプラットフォーム投稿**が可能
 - [x] 生成設定をプリセットファイルとして**エクスポート／インポート**でき、設定画面から **API キー**のバックアップと復元も可能
 
@@ -352,7 +362,7 @@ uv run python cli.py --help
 
 ## 音声合成 🗣
 
-既定のプロバイダーは無料の **Edge TTS** で、WebUI 上では **Azure TTS V1** と表示されます。MoneyPrinterTurbo は **Azure TTS V2**、**SiliconFlow TTS**、**Google Gemini TTS**、**Xiaomi MiMo TTS**、**ElevenLabs TTS**、セルフホストの **Chatterbox TTS**、**Fish Audio TTS**、および音声なしモードにも対応しています。
+既定のプロバイダーは無料の **Edge TTS** で、WebUI 上では **Azure TTS V1** と表示されます。MoneyPrinterTurbo は **Azure TTS V2**、**SiliconFlow TTS**、**Google Gemini TTS**、**Xiaomi MiMo TTS**、**ElevenLabs TTS**、セルフホストの **Chatterbox TTS**、**Fish Audio TTS**、**Local TTS (OpenAI-compatible)**（任意のセルフホストサーバーに対応）、および音声なしモードにも対応しています。
 
 WebUI でプロバイダーと音声を選択し、必要な認証情報については画面の案内に従ってください。Edge TTS に API キーは不要です。[Azure TTS V2](https://portal.azure.com/) やその他のクラウドプロバイダーでは、それぞれのプラットフォームで発行した認証情報が必要です。利用可能な Edge TTS の音声は[音声リスト](./docs/voice-list.txt)で確認できます。
 
