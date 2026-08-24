@@ -369,7 +369,7 @@ run:
 uv run python cli.py --help
 ```
 
-## Local Models 🖥️
+## Local Models 💻
 
 Both the script writer and the voiceover can run on your own machine, with no cloud account
 and no API key.
