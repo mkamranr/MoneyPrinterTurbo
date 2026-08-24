@@ -406,9 +406,13 @@ vllm_api_key = ""
 
 ### Local text-to-speech
 
-Any server that exposes OpenAI's `POST /v1/audio/speech` works — for example
+Any server that exposes OpenAI's `POST /v1/audio/speech` works. This fork's Local TTS support
+was built and tested against
+[Kokoro-TTS-OpenAPI](https://github.com/mkamranr/Kokoro-TTS-OpenAPI), walked through in the
+[worked example](#worked-example-kokoro-tts-api) below.
 [openedai-speech](https://github.com/matatonic/openedai-speech),
-[Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI), or LM Studio.
+[Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI), and LM Studio speak the same
+contract and are configured the same way.
 
 In the audio panel set **Voiceover Service** to **Local TTS (OpenAI-compatible)**:
 
@@ -441,14 +445,37 @@ voices = ["af_heart", "am_michael", "bf_emma"]
 timeout = 600
 ```
 
-#### Worked example: Kokoro
+#### Worked example: Kokoro TTS API
 
-[Kokoro](https://github.com/hexgrad/kokoro) servers expose the endpoint directly. Point the
-provider at it and load the voices:
+[Kokoro-TTS-OpenAPI](https://github.com/mkamranr/Kokoro-TTS-OpenAPI) is the server this fork's
+Local TTS provider was developed and tested against. It wraps
+[Kokoro-82M](https://github.com/hexgrad/kokoro) in an HTTP API that speaks the OpenAI speech
+contract, running CPU-native on macOS or GPU-accelerated in Docker:
 
-- **Base URL** `http://localhost:8080/v1` — match your server's port.
-- **Model** anything; Kokoro accepts the field and ignores it.
-- **Load voices from server** returns ids like `af_heart`, `am_michael`, `bf_emma`.
+```shell
+# macOS, CPU
+./scripts/setup_mac.sh
+.venv/bin/python -m app
+
+# Windows 11 + NVIDIA GPU
+cd docker && docker compose -f docker-compose.gpu.yml up --build -d
+```
+
+It binds `127.0.0.1:8080` by default. Point the provider at it and load the voices:
+
+- **Base URL** `http://localhost:8080/v1` — match `KOKORO_PORT` if you changed it.
+- **Model** anything; the field is accepted and ignored.
+- **Load voices from server** returns the server's 28 English ids — `af_heart`, `am_michael`,
+  `bf_emma`, and so on. It answers on `GET /voices` at the server root, which is the second
+  location the button probes.
+
+The OpenAI voice aliases `alloy`, `echo`, `fable`, `onyx`, `nova`, and `shimmer` also work and
+map onto Kokoro voices, so a configuration written for OpenAI's TTS keeps working unchanged.
+
+> [!NOTE]
+> Leave `KOKORO_API_KEY` unset. This provider sends no `Authorization` header, so a server
+> started with that key set rejects every synthesis request — configure it as
+> **Chatterbox TTS** instead, which is the same client with a bearer token.
 
 Two limits worth knowing:
 
@@ -615,6 +642,11 @@ MoneyPrinterTurbo was created by [harry0703](https://github.com/harry0703). This
 fork of [harry0703/MoneyPrinterTurbo](https://github.com/harry0703/MoneyPrinterTurbo); the design,
 the pipeline, and effectively all of the code originate there. Please star and follow the
 [upstream project](https://github.com/harry0703/MoneyPrinterTurbo) — that is where the work happens.
+
+The local voiceover path was built against
+[Kokoro-TTS-OpenAPI](https://github.com/mkamranr/Kokoro-TTS-OpenAPI), which packages
+[Kokoro-82M](https://github.com/hexgrad/kokoro) by [hexgrad](https://github.com/hexgrad) behind
+an OpenAI-compatible HTTP API.
 
 ## License 📝
 

@@ -420,8 +420,10 @@ voices = ["default-Female"]
 
 [local_tts]
 # Locally hosted, OpenAI-compatible text-to-speech.
-# Works with any server that exposes POST /v1/audio/speech, for example
-# openedai-speech, Kokoro-FastAPI, or LM Studio. No API key is sent; use the
+# Works with any server that exposes POST /v1/audio/speech. Developed and tested
+# against Kokoro-TTS-OpenAPI (https://github.com/mkamranr/Kokoro-TTS-OpenAPI);
+# openedai-speech, Kokoro-FastAPI and LM Studio speak the same contract, as does
+# any other OpenAI-compatible server. No API key is sent; use the
 # [chatterbox] provider instead when the server requires a bearer token.
 # base_url must include the /v1 prefix.
 base_url = "http://localhost:8000/v1"
